@@ -1,0 +1,27 @@
+# Python cache and virtual envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build/tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environment/config secrets
+.env
+.env.*
+
+# Project outputs and large local datasets
+artifacts/
+data/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
