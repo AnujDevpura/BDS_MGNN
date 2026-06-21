@@ -61,29 +61,39 @@ parser.add_argument(
     help="Apply StandardScaler"
 )
 
+parser.add_argument("--master", default=None)
+parser.add_argument("--driver-memory", default=None)
+parser.add_argument("--partitions", type=int, default=REPARTITION_COUNT)
+
 args = parser.parse_args()
 
 # ============================================================
 # SPARK
 # ============================================================
 
-spark = (
+builder = (
     SparkSession.builder
     .appName("MGNN-Phase2A")
     .config(
         "spark.sql.shuffle.partitions",
-        REPARTITION_COUNT
+        args.partitions
     )
     .config(
         "spark.default.parallelism",
-        REPARTITION_COUNT
+        args.partitions
     )
     .config(
         "spark.sql.execution.arrow.pyspark.enabled",
         "true"
     )
-    .getOrCreate()
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.sql.parquet.compression.codec", "zstd")
 )
+if args.master:
+    builder = builder.master(args.master)
+if args.driver_memory:
+    builder = builder.config("spark.driver.memory", args.driver_memory)
+spark = builder.getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
 

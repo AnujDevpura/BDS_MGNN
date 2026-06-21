@@ -2,17 +2,17 @@
 name = "mgnn-bds"
 version = "0.1.0"
 description = "Scalable Distributed Intrusion Detection using Apache Spark and Graph-Based Interpretable AI (MGNN)"
-readme = "phases/README.md"
+readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "pyspark>=3.5.0",
   "numpy>=1.26.0",
   "pandas>=2.2.0",
   "torch",
-  "torchvision",
-  "torchaudio",
-  "faiss-cpu>=1.13.2",
   "pyarrow>=24.0.0",
+  "omegaconf>=2.3.0",
+  "scikit-learn>=1.4.0",
+  "torch-geometric>=2.6.0,<2.8.0",
 ]
 
 [build-system]
@@ -27,4 +27,3 @@ url = "https://download.pytorch.org/whl/cu121"
 
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
-

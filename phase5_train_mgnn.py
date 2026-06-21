@@ -5,8 +5,10 @@
 # FINAL MULTICLASS HETEROGENEOUS RGCN TRAINING
 # =========================================================
 
+import argparse
 import gc
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +33,6 @@ from torch_geometric.nn import RGCNConv
 # =========================================================
 
 INPUT_DIR = "artifacts/phase4_pyg"
-
 MODEL_OUTPUT = "artifacts/phase5_model"
 
 DEVICE = (
@@ -66,18 +67,29 @@ PRINT_EVERY = 20
 
 EARLY_STOPPING_PATIENCE = 2
 
-# =========================================================
-# OUTPUT DIR
-# =========================================================
-
-Path(MODEL_OUTPUT).mkdir(
-    parents=True,
-    exist_ok=True
-)
+def parse_args():
+    p = argparse.ArgumentParser(description="MGNN Phase 5 training")
+    p.add_argument("--input-dir", default=INPUT_DIR)
+    p.add_argument("--output-dir", default=MODEL_OUTPUT)
+    p.add_argument("--epochs", type=int, default=NUM_EPOCHS)
+    p.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    p.add_argument("--metrics-output", default="")
+    p.add_argument("--init-model", default="")
+    p.add_argument("--num-classes", type=int, default=0)
+    p.add_argument("--normalization-input", default="")
+    return p.parse_args()
 
 # =========================================================
 # LOAD TENSORS
 # =========================================================
+
+args = parse_args()
+INPUT_DIR = args.input_dir
+MODEL_OUTPUT = args.output_dir
+NUM_EPOCHS = args.epochs
+BATCH_SIZE = args.batch_size
+
+Path(MODEL_OUTPUT).mkdir(parents=True, exist_ok=True)
 
 print("Loading PyG tensors...")
 
@@ -117,26 +129,7 @@ print("Tensors loaded")
 # FEATURE NORMALIZATION
 # =========================================================
 
-print("\nNormalizing node features...")
-
 x = x.float()
-
-feature_mean = x.mean(dim=0)
-
-feature_std = x.std(dim=0)
-
-# prevent divide-by-zero
-feature_std[feature_std == 0] = 1.0
-
-x = (x - feature_mean) / feature_std
-
-print("Feature normalization complete")
-
-print("Feature mean (global):",
-      round(x.mean().item(), 6))
-
-print("Feature std (global):",
-      round(x.std().item(), 6))
 
 # =========================================================
 # BUILD GRAPH
@@ -166,6 +159,9 @@ indices = np.arange(num_nodes)
 
 labels = y.numpy()
 
+label_values, label_frequencies = np.unique(labels, return_counts=True)
+can_stratify = len(label_values) > 1 and int(label_frequencies.min()) >= 10
+
 # -----------------------------
 # TRAIN / TEMP
 # -----------------------------
@@ -176,7 +172,7 @@ train_idx, temp_idx = train_test_split(
 
     test_size=0.2,
 
-    stratify=labels,
+    stratify=labels if can_stratify else None,
 
     random_state=42
 
@@ -187,6 +183,8 @@ train_idx, temp_idx = train_test_split(
 # -----------------------------
 
 temp_labels = labels[temp_idx]
+temp_values, temp_frequencies = np.unique(temp_labels, return_counts=True)
+can_stratify_temp = len(temp_values) > 1 and int(temp_frequencies.min()) >= 2
 
 val_idx, test_idx = train_test_split(
 
@@ -194,7 +192,7 @@ val_idx, test_idx = train_test_split(
 
     test_size=0.5,
 
-    stratify=temp_labels,
+    stratify=temp_labels if can_stratify_temp else None,
 
     random_state=42
 
@@ -246,6 +244,11 @@ data.train_mask = train_mask
 data.val_mask = val_mask
 data.test_mask = test_mask
 
+torch.save(
+    {"train_idx": train_idx, "val_idx": val_idx, "test_idx": test_idx},
+    Path(MODEL_OUTPUT) / "split_indices.pt",
+)
+
 print("Train nodes:",
       train_mask.sum().item())
 
@@ -255,16 +258,32 @@ print("Val nodes:",
 print("Test nodes:",
       test_mask.sum().item())
 
+# Fit preprocessing only on training nodes to avoid validation/test leakage.
+print("\nNormalizing node features from training statistics...")
+if args.normalization_input:
+    normalization = torch.load(args.normalization_input, map_location="cpu", weights_only=False)
+    feature_mean = normalization["mean"]
+    feature_std = normalization["std"]
+else:
+    feature_mean = x[train_idx].mean(dim=0)
+    feature_std = x[train_idx].std(dim=0)
+    feature_std[feature_std == 0] = 1.0
+x = (x - feature_mean) / feature_std
+data.x = x
+print("Feature normalization complete")
+
 # =========================================================
 # CLASS WEIGHTS
 # =========================================================
 
 print("\nComputing class weights...")
 
-num_classes = int(y.max().item()) + 1
+num_classes = args.num_classes if args.num_classes > 0 else int(y.max().item()) + 1
+if int(y.max().item()) >= num_classes:
+    raise ValueError("--num-classes must be greater than the maximum label ID")
 
 class_counts = torch.bincount(
-    y,
+    y[train_idx],
     minlength=num_classes
 ).float()
 
@@ -275,13 +294,15 @@ print(class_counts)
 # SQRT INVERSE FREQUENCY
 # -----------------------------
 
+safe_class_counts = class_counts.clamp_min(1.0)
+
 class_weights = torch.sqrt(
 
     class_counts.sum()
 
     /
 
-    (class_counts * num_classes)
+    (safe_class_counts * num_classes)
 
 )
 
@@ -407,6 +428,11 @@ model = model.to(DEVICE)
 
 print("\nModel initialized")
 print(model)
+
+if args.init_model:
+    print(f"\nLoading init model weights from: {args.init_model}")
+    state = torch.load(args.init_model, map_location=DEVICE, weights_only=False)
+    model.load_state_dict(state, strict=False)
 
 # =========================================================
 # OPTIMIZER
@@ -537,9 +563,13 @@ def evaluate(loader):
 # TRAIN LOOP
 # =========================================================
 
+run_start = time.time()
+if torch.cuda.is_available():
+    torch.cuda.reset_peak_memory_stats()
+
 print("\nStarting MGNN training...")
 
-best_val_f1 = 0
+best_val_f1 = -1.0
 
 epochs_without_improvement = 0
 
@@ -728,3 +758,31 @@ print("- classification_report.json")
 print("- training_history.json")
 
 print("\nFinal MGNN training complete.")
+
+total_runtime_sec = time.time() - run_start
+peak_gpu_mem_gb = 0.0
+if torch.cuda.is_available():
+    peak_gpu_mem_gb = torch.cuda.max_memory_allocated() / (1024**3)
+
+summary = {
+    "nodes": int(data.num_nodes),
+    "edges": int(data.num_edges),
+    "features": int(data.num_features),
+    "classes": int(num_classes),
+    "best_val_macro_f1": float(best_val_f1),
+    "test_accuracy": float(test_acc),
+    "test_macro_f1": float(test_f1),
+    "runtime_sec": float(total_runtime_sec),
+    "peak_gpu_mem_gb": float(peak_gpu_mem_gb),
+    "epochs_ran": int(len(history)),
+}
+
+summary_path = Path(MODEL_OUTPUT) / "run_summary.json"
+summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+torch.save(
+    {"mean": feature_mean.cpu(), "std": feature_std.cpu()},
+    Path(MODEL_OUTPUT) / "feature_normalization.pt",
+)
+if args.metrics_output:
+    Path(args.metrics_output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.metrics_output).write_text(json.dumps(summary, indent=2), encoding="utf-8")

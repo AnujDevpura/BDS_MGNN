@@ -1,385 +1,112 @@
-# phase3b_similarity.py
+import argparse
 
-# =========================================================
-# MGNN PHASE 3B
-# FAISS IVF COSINE SIMILARITY GRAPH
-# =========================================================
+from pyspark.ml.feature import BucketedRandomProjectionLSH, Normalizer
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
-import gc
-import faiss
-import numpy as np
-import pandas as pd
+from pipeline_utils import build_spark, validate_min_rows, write_metrics_json
 
-from pyspark.sql import SparkSession
-from pyspark.ml.functions import vector_to_array
 
-# =========================================================
-# CONFIG
-# =========================================================
+def parse_args():
+    p = argparse.ArgumentParser(description="MGNN Phase 3B - distributed similarity graph")
+    p.add_argument("--input", default="artifacts/phase2_sampled_500k")
+    p.add_argument("--output", default="artifacts/phase3_similarity")
+    p.add_argument("--metrics-output", default="artifacts/metrics/phase3b_metrics.json")
+    p.add_argument("--top-k", type=int, default=3)
+    p.add_argument("--min-similarity", type=float, default=0.80)
+    p.add_argument("--bucket-length", type=float, default=2.0)
+    p.add_argument("--num-hash-tables", type=int, default=3)
+    p.add_argument("--max-distance", type=float, default=0.65)
+    p.add_argument("--master", default=None)
+    p.add_argument("--driver-memory", default="10g")
+    p.add_argument("--shuffle-partitions", type=int, default=96)
+    p.add_argument("--default-parallelism", type=int, default=48)
+    p.add_argument("--output-mode", default="overwrite")
+    p.add_argument("--min-output-rows", type=int, default=100000)
+    p.add_argument("--max-nodes", type=int, default=0)
+    return p.parse_args()
 
-# -----------------------------
-# INPUT / OUTPUT
-# -----------------------------
 
-INPUT_PATH = "artifacts/phase2_sampled_500k"
-
-OUTPUT_PATH = "artifacts/phase3_similarity"
-
-# -----------------------------
-# GRAPH VERSIONING
-# -----------------------------
-
-GRAPH_NAME = "similarity_graph"
-
-EXPERIMENT_TAG = "ivf_k8_550k"
-
-# -----------------------------
-# SIMILARITY GRAPH
-# -----------------------------
-
-TOP_K = 3
-
-MIN_SIMILARITY = 0.80
-
-REMOVE_DUPLICATES = True
-
-REMOVE_SELF_LOOPS = True
-
-# -----------------------------
-# FAISS IVF
-# -----------------------------
-
-NLIST = 256
-
-NPROBE = 16
-
-FAISS_THREADS = 6
-
-# -----------------------------
-# SPARK CONFIG
-# -----------------------------
-
-SPARK_DRIVER_MEMORY = "10g"
-
-LOCAL_CORES = "local[12]"
-
-# -----------------------------
-# STORAGE
-# -----------------------------
-
-OUTPUT_MODE = "overwrite"
-
-SAVE_STATS = True
-
-# =========================================================
-# FAISS THREADING
-# =========================================================
-
-faiss.omp_set_num_threads(FAISS_THREADS)
-
-# =========================================================
-# SPARK SESSION
-# =========================================================
-
-spark = (
-    SparkSession.builder
-    .appName(f"{GRAPH_NAME}_{EXPERIMENT_TAG}")
-    .master(LOCAL_CORES)
-    .config(
-        "spark.driver.memory",
-        SPARK_DRIVER_MEMORY
+def main():
+    args = parse_args()
+    spark = build_spark(
+        app_name="MGNN-Phase3B-SimilarityLSH",
+        master=args.master,
+        driver_memory=args.driver_memory,
+        shuffle_partitions=args.shuffle_partitions,
+        default_parallelism=args.default_parallelism,
+        enable_adaptive=True,
+        enable_dynamic_allocation=False,
+        parquet_compression="zstd",
     )
-    .getOrCreate()
-)
 
-spark.sparkContext.setLogLevel("WARN")
+    df = spark.read.parquet(args.input).select("node_id", "features")
+    if "features" not in df.columns:
+        raise ValueError("Missing required features column")
+    if args.max_nodes > 0:
+        df = df.orderBy("node_id").limit(args.max_nodes)
 
-print("Spark started")
+    normalized = Normalizer(inputCol="features", outputCol="features_l2", p=2.0).transform(df)
 
-# =========================================================
-# LOAD DATA
-# =========================================================
-
-print("\nLoading Phase 2 sampled features...")
-
-df = (
-    spark.read.parquet(INPUT_PATH)
-    .select(
-        "node_id",
-        "attack_type",
-        "label_multiclass",
-        "features"
+    lsh = BucketedRandomProjectionLSH(
+        inputCol="features_l2",
+        outputCol="hashes",
+        bucketLength=args.bucket_length,
+        numHashTables=args.num_hash_tables,
     )
-)
+    model = lsh.fit(normalized)
 
-node_count = df.count()
-
-print("Loaded nodes:", node_count)
-
-# =========================================================
-# VECTOR -> ARRAY
-# =========================================================
-
-print("\nConverting Spark vectors...")
-
-df = df.withColumn(
-    "features_array",
-    vector_to_array("features")
-)
-
-# =========================================================
-# COLLECT TO PANDAS
-# =========================================================
-
-print("\nCollecting vectors to NumPy...")
-
-pdf = df.select(
-    "node_id",
-    "features_array"
-).toPandas()
-
-node_ids = pdf["node_id"].values.astype(np.int64)
-
-vectors = np.vstack(
-    pdf["features_array"].values
-).astype("float32")
-
-print("Vector matrix shape:", vectors.shape)
-
-# =========================================================
-# CLEAN VECTOR VALUES
-# =========================================================
-
-print("\nCleaning vectors...")
-
-vectors = np.nan_to_num(
-    vectors,
-    nan=0.0,
-    posinf=0.0,
-    neginf=0.0
-)
-
-vectors = np.clip(
-    vectors,
-    -1e6,
-    1e6
-)
-
-print("NaN count:",
-      np.isnan(vectors).sum())
-
-print("Inf count:",
-      np.isinf(vectors).sum())
-
-# =========================================================
-# FREE SPARK MEMORY
-# =========================================================
-
-spark.stop()
-
-print("\nSpark stopped to free RAM")
-
-gc.collect()
-
-# =========================================================
-# NORMALIZE FOR COSINE SIMILARITY
-# =========================================================
-
-print("\nNormalizing vectors...")
-
-faiss.normalize_L2(vectors)
-
-# =========================================================
-# BUILD IVF INDEX
-# =========================================================
-
-dimension = vectors.shape[1]
-
-print("\nBuilding IVF index...")
-
-quantizer = faiss.IndexFlatIP(dimension)
-
-index = faiss.IndexIVFFlat(
-    quantizer,
-    dimension,
-    NLIST,
-    faiss.METRIC_INNER_PRODUCT
-)
-
-# =========================================================
-# TRAIN INDEX
-# =========================================================
-
-print("\nTraining IVF index...")
-
-index.train(vectors)
-
-print("IVF index trained")
-
-# =========================================================
-# ADD VECTORS
-# =========================================================
-
-print("\nAdding vectors to index...")
-
-index.add(vectors)
-
-print("Indexed vectors:", index.ntotal)
-
-# =========================================================
-# SEARCH CONFIG
-# =========================================================
-
-index.nprobe = NPROBE
-
-# =========================================================
-# ANN SEARCH
-# =========================================================
-
-print("\nRunning ANN similarity search...")
-print("This may take several minutes...")
-
-distances, indices = index.search(
-    vectors,
-    TOP_K + 1
-)
-
-print("ANN search complete")
-
-# =========================================================
-# BUILD EDGE LIST
-# =========================================================
-
-print("\nBuilding similarity edges...")
-
-edges = []
-
-num_nodes = len(node_ids)
-
-for i in range(num_nodes):
-
-    src = int(node_ids[i])
-
-    for j in range(1, TOP_K + 1):
-
-        neighbor_idx = int(indices[i][j])
-
-        # invalid neighbor
-        if neighbor_idx < 0:
-            continue
-
-        dst = int(node_ids[neighbor_idx])
-
-        similarity = float(distances[i][j])
-
-        # weak similarity
-        if similarity < MIN_SIMILARITY:
-            continue
-
-        # self loop removal
-        if REMOVE_SELF_LOOPS and src == dst:
-            continue
-
-        edges.append(
-            (
-                src,
-                dst,
-                similarity,
-                "similarity"
-            )
+    approx = model.approxSimilarityJoin(
+        normalized.alias("a"), normalized.alias("b"), args.max_distance, distCol="dist"
+    )
+    pairs = (
+        approx.where(F.col("datasetA.node_id") != F.col("datasetB.node_id"))
+        .select(
+            F.col("datasetA.node_id").alias("src"),
+            F.col("datasetB.node_id").alias("dst"),
+            F.col("dist").alias("dist"),
         )
+        .dropDuplicates(["src", "dst"])
+    )
 
-    if i % 10000 == 0:
-        print(f"Processed {i}/{num_nodes}")
-
-# =========================================================
-# CREATE EDGE DATAFRAME
-# =========================================================
-
-print("\nCreating edge dataframe...")
-
-edge_df = pd.DataFrame(
-    edges,
-    columns=[
-        "src",
-        "dst",
+    # For L2-normalized vectors: cosine_similarity = 1 - squared_euclidean_distance / 2.
+    pairs = pairs.withColumn(
         "weight",
-        "edge_type"
-    ]
-)
+        F.greatest(F.lit(-1.0), F.least(F.lit(1.0), F.lit(1.0) - (F.col("dist") ** 2) / 2.0)),
+    ).where(F.col("weight") >= F.lit(args.min_similarity))
 
-print("Raw similarity edges:",
-      len(edge_df))
-
-# =========================================================
-# REMOVE DUPLICATES
-# =========================================================
-
-if REMOVE_DUPLICATES:
-
-    edge_df = edge_df.drop_duplicates(
-        subset=["src", "dst"]
+    knn_window = Window.partitionBy("src").orderBy(F.col("weight").desc())
+    edges = (
+        pairs.withColumn("rnk", F.row_number().over(knn_window))
+        .where(F.col("rnk") <= args.top_k)
+        .drop("rnk", "dist")
+        .withColumn("edge_type", F.lit("similarity"))
     )
 
-print("Unique similarity edges:",
-      len(edge_df))
+    edges.write.mode(args.output_mode).parquet(args.output)
+    edge_count = validate_min_rows(edges, args.min_output_rows, "Phase3B similarity edges")
 
-# =========================================================
-# SAVE GRAPH
-# =========================================================
-
-print("\nSaving similarity graph...")
-
-edge_df.to_parquet(
-    OUTPUT_PATH,
-    index=False
-)
-
-print("Similarity graph saved")
-
-# =========================================================
-# FINAL STATS
-# =========================================================
-
-if SAVE_STATS:
-
-    avg_degree = len(edge_df) / num_nodes
-
-    print("\n==============================")
-    print("SIMILARITY GRAPH STATS")
-    print("==============================")
-
-    print("Graph Name:",
-          GRAPH_NAME)
-
-    print("Experiment:",
-          EXPERIMENT_TAG)
-
-    print("\nNodes:",
-          num_nodes)
-
-    print("Edges:",
-          len(edge_df))
-
-    print("\nAverage degree:",
-          round(avg_degree, 2))
-
-    print("\nTop-K neighbors:",
-          TOP_K)
-
-    print("Minimum similarity:",
-          MIN_SIMILARITY)
-
-    print("\nSimilarity weight statistics:")
-
-    print(
-        edge_df["weight"].describe()
+    write_metrics_json(
+        args.metrics_output,
+        {
+            "phase": "phase3b_similarity",
+            "input_path": args.input,
+            "output_path": args.output,
+            "edge_count": edge_count,
+            "top_k": args.top_k,
+            "min_similarity": args.min_similarity,
+            "bucket_length": args.bucket_length,
+            "num_hash_tables": args.num_hash_tables,
+            "max_distance": args.max_distance,
+            "spark_master": args.master,
+            "shuffle_partitions": args.shuffle_partitions,
+        },
     )
 
-    print("\nExample edges:")
+    print("Phase 3B complete")
+    print(f"Similarity edges: {edge_count}")
+    spark.stop()
 
-    print(
-        edge_df.head(10)
-    )
 
-print("\nPhase 3B similarity graph complete.")
+if __name__ == "__main__":
+    main()

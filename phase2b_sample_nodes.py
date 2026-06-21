@@ -1,357 +1,118 @@
-# phase2b_sample_nodes.py
+import argparse
 
-# =========================================================
-# MGNN PHASE 2B
-# STRATIFIED CANONICAL NODE UNIVERSE
-# =========================================================
-
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
-# =========================================================
-# CONFIG
-# =========================================================
+from pipeline_utils import build_spark, class_distribution, validate_min_rows, write_metrics_json
 
-# ---------------------------------------------------------
-# INPUT
-# ---------------------------------------------------------
-
-INPUT_PATH = "artifacts/phase2_features"
-
-# ---------------------------------------------------------
-# OUTPUT
-# ---------------------------------------------------------
-
-OUTPUT_PATH = "artifacts/phase2_sampled_500k"
-
-# ---------------------------------------------------------
-# TARGET CLASS COUNTS
-# ---------------------------------------------------------
 
 TARGET_COUNTS = {
-
-    # major classes
     "benign": 150000,
-
     "dos_hulk": 100000,
-
     "ddos": 80000,
-
     "portscan": 80000,
-
-    # medium classes
     "dos_goldeneye": 30000,
-
     "ftp_patator": 25000,
-
     "ssh_patator": 25000,
-
     "dos_slowloris": 20000,
-
     "dos_slowhttptest": 20000,
-
-    # smaller classes
     "bot": 9000,
-
     "web_bruteforce": 7000,
-
     "web_xss": 3000,
-
-    # preserve all rare classes
     "infiltration": 1000000,
-
     "web_sql_injection": 1000000,
-
     "heartbleed": 1000000,
-
 }
 
-# ---------------------------------------------------------
-# RANDOMNESS
-# ---------------------------------------------------------
 
-RANDOM_SEED = 42
+def parse_args():
+    p = argparse.ArgumentParser(description="MGNN Phase 2B - stratified canonical node universe")
+    p.add_argument("--input", default="artifacts/phase2_features")
+    p.add_argument("--output", default="artifacts/phase2_sampled_500k")
+    p.add_argument("--metrics-output", default="artifacts/metrics/phase2b_metrics.json")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--master", default=None)
+    p.add_argument("--driver-memory", default="8g")
+    p.add_argument("--shuffle-partitions", type=int, default=64)
+    p.add_argument("--default-parallelism", type=int, default=32)
+    p.add_argument("--output-format", choices=["parquet"], default="parquet")
+    p.add_argument("--output-mode", default="overwrite")
+    p.add_argument("--min-output-rows", type=int, default=100000)
+    return p.parse_args()
 
-# ---------------------------------------------------------
-# SPARK
-# ---------------------------------------------------------
 
-SPARK_DRIVER_MEMORY = "8g"
+def main():
+    args = parse_args()
 
-LOCAL_CORES = "local[12]"
-
-SHUFFLE_PARTITIONS = 32
-
-DEFAULT_PARALLELISM = 12
-
-# ---------------------------------------------------------
-# STORAGE
-# ---------------------------------------------------------
-
-OUTPUT_MODE = "overwrite"
-
-# =========================================================
-# SPARK SESSION
-# =========================================================
-
-spark = (
-    SparkSession.builder
-    .appName("MGNN-Phase2B-StratifiedSampling")
-    .master(LOCAL_CORES)
-    .config(
-        "spark.driver.memory",
-        SPARK_DRIVER_MEMORY
-    )
-    .config(
-        "spark.sql.shuffle.partitions",
-        SHUFFLE_PARTITIONS
-    )
-    .config(
-        "spark.default.parallelism",
-        DEFAULT_PARALLELISM
-    )
-    .getOrCreate()
-)
-
-spark.sparkContext.setLogLevel("WARN")
-
-print("Spark started")
-
-# =========================================================
-# LOAD PHASE 2 FEATURES
-# =========================================================
-
-print("\nLoading Phase 2 feature dataset...")
-
-df = spark.read.parquet(INPUT_PATH)
-
-total_rows = df.count()
-
-print("Total rows:", total_rows)
-
-# =========================================================
-# REQUIRED COLUMNS
-# =========================================================
-
-required_cols = [
-
-    "node_id",
-
-    "event_time",
-
-    "attack_type",
-
-    "label_multiclass",
-
-    "label_binary",
-
-    "features",
-
-]
-
-missing = [
-
-    c for c in required_cols
-    if c not in df.columns
-
-]
-
-if missing:
-
-    raise ValueError(
-        f"Missing columns: {missing}"
+    spark = build_spark(
+        app_name="MGNN-Phase2B-StratifiedSampling",
+        master=args.master,
+        driver_memory=args.driver_memory,
+        shuffle_partitions=args.shuffle_partitions,
+        default_parallelism=args.default_parallelism,
+        enable_adaptive=True,
+        enable_dynamic_allocation=False,
+        parquet_compression="zstd",
     )
 
-print("\nRequired columns verified")
+    print("Loading Phase 2 feature dataset...")
+    df = spark.read.parquet(args.input)
 
-# =========================================================
-# REMOVE DUPLICATE NODE IDS
-# =========================================================
+    required_cols = ["node_id", "event_time", "attack_type", "label_multiclass", "label_binary", "features"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
 
-print("\nRemoving duplicate node IDs...")
+    df = df.where(F.col("attack_type").isin(list(TARGET_COUNTS))).dropDuplicates(["node_id"]).cache()
+    class_counts_df = df.groupBy("attack_type").count().cache()
+    class_counts = {r["attack_type"]: int(r["count"]) for r in class_counts_df.collect()}
 
-df = df.dropDuplicates(["node_id"])
+    fractions = {}
+    for cls, cnt in class_counts.items():
+        target = TARGET_COUNTS.get(cls, cnt)
+        fractions[cls] = min(1.0, float(target) / float(cnt)) if cnt > 0 else 0.0
 
-unique_nodes = df.count()
+    sampled = df.sampleBy("attack_type", fractions=fractions, seed=args.seed)
 
-print("Unique nodes:", unique_nodes)
+    rank_window = Window.partitionBy("attack_type").orderBy(F.rand(args.seed))
+    sampled = sampled.withColumn("row_rank", F.row_number().over(rank_window))
+    target_map_expr = F.create_map([F.lit(x) for kv in TARGET_COUNTS.items() for x in kv])
+    sampled = sampled.withColumn(
+        "target_cap",
+        F.coalesce(target_map_expr[F.col("attack_type")].cast("int"), F.lit(2147483647)),
+    ).where(F.col("row_rank") <= F.col("target_cap")).drop("row_rank", "target_cap")
 
-# =========================================================
-# ORIGINAL CLASS DISTRIBUTION
-# =========================================================
+    final_cols = ["node_id", "event_time", "attack_type", "label_multiclass", "label_binary"]
+    if "replica_id" in sampled.columns:
+        final_cols.append("replica_id")
+    final_cols.append("features")
+    sampled = sampled.select(*final_cols)
 
-print("\nOriginal class distribution:")
+    sampled.write.mode(args.output_mode).format(args.output_format).save(args.output)
 
-class_counts = (
+    out_rows = validate_min_rows(sampled, args.min_output_rows, "Phase2B output")
+    dist = class_distribution(sampled, "attack_type")
 
-    df.groupBy("attack_type")
-    .count()
-
-)
-
-class_counts.orderBy(
-    F.desc("count")
-).show(
-    50,
-    truncate=False
-)
-
-# =========================================================
-# STRATIFIED SAMPLING
-# =========================================================
-
-print("\nPerforming stratified sampling...")
-
-sampled_parts = []
-
-for attack_class, target_count in TARGET_COUNTS.items():
-
-    print(f"\nProcessing class: {attack_class}")
-
-    class_df = df.filter(
-        F.col("attack_type") == attack_class
+    write_metrics_json(
+        args.metrics_output,
+        {
+            "phase": "phase2b_sample_nodes",
+            "input_path": args.input,
+            "output_path": args.output,
+            "output_rows": out_rows,
+            "distinct_classes": len(dist),
+            "class_distribution": dist,
+            "fractions": fractions,
+            "spark_master": args.master,
+            "shuffle_partitions": args.shuffle_partitions,
+        },
     )
 
-    actual_count = class_df.count()
+    print("Phase 2B complete")
+    print(f"Output rows: {out_rows}")
+    print(f"Output path: {args.output}")
+    spark.stop()
 
-    print("Actual rows:", actual_count)
 
-    # -----------------------------------------------------
-    # KEEP ALL SMALL CLASSES
-    # -----------------------------------------------------
-
-    if actual_count <= target_count:
-
-        print("Keeping all rows")
-
-        sampled_parts.append(class_df)
-
-    # -----------------------------------------------------
-    # DOWNSAMPLE LARGE CLASSES
-    # -----------------------------------------------------
-
-    else:
-
-        print(f"Sampling down to {target_count}")
-
-        sampled_class = (
-
-            class_df
-
-            .sample(
-                withReplacement=False,
-                fraction=target_count / actual_count,
-                seed=RANDOM_SEED
-            )
-            .limit(target_count)
-
-        )
-
-        sampled_parts.append(sampled_class)
-
-# =========================================================
-# UNION ALL SAMPLED CLASSES
-# =========================================================
-
-print("\nCombining sampled classes...")
-
-sampled_df = sampled_parts[0]
-
-for extra in sampled_parts[1:]:
-
-    sampled_df = sampled_df.unionByName(extra)
-
-# =========================================================
-# FINAL COLUMN ORDER
-# =========================================================
-
-final_cols = [
-
-    "node_id",
-
-    "event_time",
-
-    "attack_type",
-
-    "label_multiclass",
-
-    "label_binary",
-
-]
-
-if "replica_id" in sampled_df.columns:
-
-    final_cols.append("replica_id")
-
-final_cols.append("features")
-
-sampled_df = sampled_df.select(*final_cols)
-
-# =========================================================
-# SAVE
-# =========================================================
-
-print("\nSaving canonical node universe...")
-
-sampled_df.write.mode(
-    OUTPUT_MODE
-).parquet(
-    OUTPUT_PATH
-)
-
-# =========================================================
-# VALIDATION
-# =========================================================
-
-print("\n==============================")
-print("PHASE 2B COMPLETE")
-print("==============================")
-
-final_count = sampled_df.count()
-
-print("\nTotal sampled nodes:",
-      final_count)
-
-print("\nOutput path:")
-print(OUTPUT_PATH)
-
-print("\nFinal class distribution:")
-
-sampled_df.groupBy(
-    "attack_type"
-).count().orderBy(
-    F.desc("count")
-).show(
-    50,
-    truncate=False
-)
-
-print("\nFinal multiclass distribution:")
-
-sampled_df.groupBy(
-    "label_multiclass"
-).count().orderBy(
-    "label_multiclass"
-).show(
-    50,
-    truncate=False
-)
-
-print("\nSchema:")
-
-sampled_df.printSchema()
-
-print("\nSample rows:")
-
-sampled_df.show(
-    5,
-    truncate=False
-)
-
-# =========================================================
-# CLEANUP
-# =========================================================
-
-spark.stop()
-
-print("\nCanonical stratified node universe created.")
+if __name__ == "__main__":
+    main()

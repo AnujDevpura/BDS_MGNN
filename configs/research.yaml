@@ -1,0 +1,20 @@
+project_name: mgnn-bds-research
+tracking:
+  enable_mlflow: false
+  enable_wandb: false
+  output_dir: artifacts/experiments
+
+ablation:
+  scales: [100000, 300000, 550000]
+  phase2_input: artifacts/phase2_sampled_500k
+  phase3_input: artifacts/phase3_final
+  base_output: artifacts/ablation
+  epochs: 10
+  batch_size: 1024
+
+streaming:
+  input: artifacts/phase2_sampled_500k
+  output_root: artifacts/streaming
+  window_hours: 6
+  step_hours: 2
+  max_windows: 12

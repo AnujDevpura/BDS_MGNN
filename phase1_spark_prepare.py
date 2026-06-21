@@ -50,6 +50,9 @@ def parse_args():
         default=32
     )
 
+    parser.add_argument("--master", default=None)
+    parser.add_argument("--driver-memory", default=None)
+
     return parser.parse_args()
 
 # =========================================================
@@ -172,10 +175,15 @@ def ensure_timestamp(
     print("\nTimestamp column:",
           ts_col)
 
+    raw = F.col(ts_col)
     return df.withColumn(
         "event_time",
-        F.to_timestamp(
-            F.col(ts_col)
+        F.coalesce(
+            F.to_timestamp(raw),
+            F.to_timestamp(raw, "M/d/yyyy H:mm"),
+            F.to_timestamp(raw, "M/d/yyyy H:mm:ss"),
+            F.to_timestamp(raw, "dd/MM/yyyy HH:mm"),
+            F.to_timestamp(raw, "dd/MM/yyyy HH:mm:ss"),
         )
     )
 
@@ -299,15 +307,19 @@ def main():
 
     args = parse_args()
 
-    spark = (
+    builder = (
         SparkSession.builder
         .appName("MGNN-Phase1")
-        .config(
-            "spark.sql.shuffle.partitions",
-            str(args.partitions)
-        )
-        .getOrCreate()
+        .config("spark.sql.shuffle.partitions", str(args.partitions))
+        .config("spark.default.parallelism", str(args.partitions))
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.parquet.compression.codec", "zstd")
     )
+    if args.master:
+        builder = builder.master(args.master)
+    if args.driver_memory:
+        builder = builder.config("spark.driver.memory", args.driver_memory)
+    spark = builder.getOrCreate()
 
     print("\nSpark started")
 
@@ -359,7 +371,10 @@ def main():
     raw_df = (
         spark.read
         .option("header", True)
-        .option("enforceSchema", False)
+        # CICIDS files contain duplicate and whitespace-inconsistent headers.
+        # Apply the inferred schema by column position instead of validating names per file.
+        .option("enforceSchema", True)
+        .option("mode", "PERMISSIVE")
         .option("inferSchema", True)
         .csv(input_paths)
     )
