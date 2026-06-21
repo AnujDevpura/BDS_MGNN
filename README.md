@@ -237,3 +237,14 @@ Full experiment:
 Final table:
 artifacts/ablation/ablation_results.json
 The current node universe contains approximately 549k nodes, so a 1M-node ablation requires increasing the Phase 2B sample size or using controlled replication.
+
+
+BenchMarking 
+Run all baselines:
+
+.\.venv\Scripts\python.exe run_model_benchmarks.py `
+  --models "xgboost,mlp,cnn,lstm,graphsage,gat" `
+  --epochs 10 `
+  --dense-batch-size 4096 `
+  --graph-batch-size 1024 `
+  --inference-batch-size 512
