@@ -181,9 +181,9 @@ Instead of flat CSV rows, we build a **Multi-Relational Graph**:
 
 ## Slide 9: Experimental Results & Benchmarks
 **Crushing the Deep Learning Baselines**
-* **Macro F1 Score Mastery:** MGNN achieved a Macro F1 score of **0.806**, significantly outperforming 1D-CNN (0.579), LSTM (0.662), and GAT (0.498), establishing it as the state-of-the-art Deep Learning solution.
+* **Macro F1 Score Mastery:** MGNN achieved a Macro F1 score of **0.864**, significantly outperforming 1D-CNN (0.579), LSTM (0.662), and GAT (0.498), establishing it as the state-of-the-art Deep Learning solution.
 * **Latency & Scalability:** Through Spark processing and PyG `NeighborLoader` optimization, the system achieves a throughput of **42,500+ Nodes per second** with a 95th percentile latency of **under 15ms**. 
-* **Ablation Findings:** The system exhibits *positive scaling*. Models trained on 100k nodes achieved ~0.77 F1, while models trained on the full 450k node graph reached ~0.80 F1. The more Big Data we feed the graph, the smarter it gets.
+* **Ablation Findings:** The system exhibits *positive scaling*. Models trained on 100k nodes achieved ~0.77 F1, while models trained on the full 450k node graph reached ~0.86 F1. The more Big Data we feed the graph, the smarter it gets.
 
 **Presenter Notes:** 
 > When testing against an onslaught of sophisticated evasion attacks, XGBoost's F1 score plummets. However, as our real-time dashboard demonstrates, MGNN leverages the unperturbed features of surrounding neighbors to successfully identify anomalies, achieving unprecedented adversarial robustness.

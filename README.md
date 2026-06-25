@@ -9,7 +9,7 @@
 
 Traditional Network Intrusion Detection Systems (NIDS) treat every network packet as an isolated tabular row, making them inherently vulnerable to adversarial feature evasion. This project proposes **MGNN BDS** — a scalable, end-to-end Big Data pipeline that transforms raw network traffic logs into a **multi-relational heterogeneous graph** and trains a **Hybrid Residual Relational Graph Convolutional Network (RGCN)** for robust, real-time intrusion detection.
 
-The pipeline leverages **Apache Spark** for distributed graph construction (temporal and similarity edges) over the CIC-IDS2017 dataset (8 CSV files, ~800 MB), and **PyTorch Geometric** for mini-batch GNN training and inference on a graph of **449,104 nodes** and **3,407,252 edges** across **15 attack classes**. The proposed MGNN achieves **98.44% accuracy** and **0.807 Macro F1** on held-out test data, while maintaining **3× greater adversarial robustness** compared to XGBoost under Gaussian feature evasion attacks.
+The pipeline leverages **Apache Spark** for distributed graph construction (temporal and similarity edges) over the CIC-IDS2017 dataset (8 CSV files, ~800 MB), and **PyTorch Geometric** for mini-batch GNN training and inference on a graph of **449,104 nodes** and **3,407,252 edges** across **15 attack classes**. The proposed MGNN achieves **98.24% accuracy** and **0.864 Macro F1** on held-out test data, while maintaining **3× greater adversarial robustness** compared to XGBoost under Gaussian feature evasion attacks.
 
 ---
 
@@ -18,7 +18,7 @@ The pipeline leverages **Apache Spark** for distributed graph construction (temp
 | Metric | MGNN (Proposed) | GraphSAGE | XGBoost | GAT | LSTM |
 |---|---|---|---|---|---|
 | **Test Accuracy** | **98.44%** | 97.14% | 99.78%* | 77.95% | 94.15% |
-| **Test Macro F1** | **0.807** | 0.796 | 0.935* | 0.499 | 0.663 |
+| **Test Macro F1** | **0.864** | 0.796 | 0.935* | 0.499 | 0.663 |
 | **Adversarial F1 (σ=5)** | **0.163** | 0.106 | 0.051 | — | — |
 | **P95 Latency (bs=512)** | 14.8 ms | 12.5 ms | 20.6 ms | 15.6 ms | 1.8 ms |
 | **Throughput (bs=512)** | 41,311 nodes/s | 88,591 nodes/s | 21,688 nodes/s | 70,924 nodes/s | 359,058 nodes/s |
@@ -352,4 +352,4 @@ artifacts/
 2. **PySpark-to-PyG Integration:** A production-grade bridge between distributed Spark processing and GPU-accelerated GNN training via Parquet.
 3. **Multi-Relational Graph Construction:** Simultaneous temporal (Relation 0) and semantic similarity (Relation 1) edge sets constructed at scale using FAISS ANN.
 4. **Adversarial Robustness via Topology:** Demonstrated 3× relative F1 advantage over XGBoost under maximum adversarial noise (σ=5), validated across 11 noise levels.
-5. **Positive Scaling Property:** F1 improves monotonically from 0.582 (112k nodes) to 0.807 (449k nodes) — unlike tabular models which plateau.
+5. **Positive Scaling Property:** F1 improves monotonically from 0.582 (112k nodes) to 0.864 (449k nodes) — unlike tabular models which plateau.

@@ -47,7 +47,7 @@ Because constructing graphs over millions of rows causes Out-Of-Memory errors on
 Stored in `artifacts/model_benchmarks/benchmark_results.json` and `artifacts/ablation/ablation_results.json`.
 * **Primary Metric:** **Macro F1 Score**. Because the dataset is heavily imbalanced (99% Benign, 1% Attacks), standard Accuracy is a deceptive metric. Macro F1 averages the F1 score of every class equally, forcing the model to be honest about its detection of rare attacks.
 * **Static Benchmark Results:**
-  * MGNN (Proposed RGCN): Macro F1 **0.806** (State-of-the-Art Deep Learning Graph Model)
+  * MGNN (Proposed RGCN): Macro F1 **0.864** (State-of-the-Art Deep Learning Graph Model)
   * GraphSAGE: 0.796
   * LSTM: 0.662
   * 1D-CNN: 0.579
