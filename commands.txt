@@ -1,0 +1,209 @@
+# MGNN Big-Data Pipeline (Phase-wise)
+# =====================================
+
+#########################
+# ENVIRONMENT SETUP (run once per terminal session)
+#########################
+cd "C:\My Projects\MGNN_BDS"
+.\.venv\Scripts\Activate.ps1
+
+$env:HADOOP_HOME="C:\hadoop"
+${env:hadoop.home.dir}="C:\hadoop"
+$env:Path="C:\hadoop\bin;$env:Path"
+
+$env:PYSPARK_PYTHON="$PWD\.venv\Scripts\python.exe"
+$env:PYSPARK_DRIVER_PYTHON="$PWD\.venv\Scripts\python.exe"
+
+$env:PYSPARK_SUBMIT_ARGS="--master local[12] --driver-memory 12g --conf spark.executor.memory=12g --conf spark.sql.shuffle.partitions=64 --conf spark.default.parallelism=64 --conf spark.memory.fraction=0.8 --conf spark.memory.storageFraction=0.2 --conf spark.hadoop.parquet.enable.dictionary=false pyspark-shell"
+
+#########################
+# FULL DATA PIPELINE (Phases 1-4)
+#########################
+
+# Phase 1: CICIDS preparation
+.\.venv\Scripts\python.exe phase1_spark_prepare.py `
+  --input "data/*.csv" `
+  --output "artifacts/phase1_output" `
+  --replication-factor 1 `
+  --partitions 64 `
+  --master "local[12]" `
+  --driver-memory "12g"
+
+# Phase 2A: Feature engineering
+.\.venv\Scripts\python.exe phase2a_feature_engineering.py `
+  --input "artifacts/phase1_output" `
+  --output "artifacts/phase2_features" `
+  --validation-output "artifacts/phase2_validation" `
+  --scale `
+  --master "local[12]" `
+  --driver-memory "12g" `
+  --partitions 64
+
+# Phase 2B: Balanced sampling
+.\.venv\Scripts\python.exe phase2b_sample_nodes.py `
+  --input "artifacts/phase2_features" `
+  --output "artifacts/phase2_sampled_500k" `
+  --master "local[12]" `
+  --driver-memory "10g" `
+  --shuffle-partitions 64
+
+# Phase 3A: Temporal graph
+.\.venv\Scripts\python.exe phase3a_temporal.py `
+  --input "artifacts/phase2_sampled_500k" `
+  --output "artifacts/phase3_temporal" `
+  --master "local[12]" `
+  --driver-memory "12g" `
+  --shuffle-partitions 96
+
+# Phase 3B: Similarity graph (FAISS ANN)
+.\.venv\Scripts\python.exe phase3b_similarity_fast.py `
+  --input "artifacts/phase2_sampled_500k" `
+  --output "artifacts/phase3_similarity" `
+  --top-k 3 `
+  --min-similarity 0.80 `
+  --nlist 256 `
+  --nprobe 16 `
+  --search-batch-size 50000 `
+  --faiss-threads 8 `
+  --master "local[12]" `
+  --driver-memory "12g" `
+  --shuffle-partitions 96
+
+# Phase 3C: Heterogeneous graph fusion
+.\.venv\Scripts\python.exe phase3c_combine.py `
+  --temporal-input "artifacts/phase3_temporal" `
+  --similarity-input "artifacts/phase3_similarity" `
+  --output "artifacts/phase3_final" `
+  --master "local[12]" `
+  --driver-memory "10g" `
+  --shuffle-partitions 96
+
+# Phase 4: PyG tensor export
+.\.venv\Scripts\python.exe phase4_export_pyg.py `
+  --feature-input "artifacts/phase2_sampled_500k" `
+  --edge-input "artifacts/phase3_final" `
+  --output-dir "artifacts/phase4_pyg" `
+  --master "local[12]" `
+  --driver-memory "12g" `
+  --shuffle-partitions 96
+
+#########################
+# PHASE 5: MGNN v2 TRAINING (upgraded architecture)
+# - 3-layer Relation-Gated RGCN
+# - Hidden dim 128
+# - Focal loss gamma=2.0
+# - Minority oversampling alpha=0.3
+# - 5-epoch finetune pass on minority classes
+# - Saves node embeddings for UMAP/SIGN
+#########################
+
+.\.venv\Scripts\python.exe phase5_train_mgnn.py `
+  --input-dir "artifacts/phase4_pyg" `
+  --output-dir "artifacts/phase5_model" `
+  --model-version v2 `
+  --epochs 10 `
+  --batch-size 1024 `
+  --num-classes 15 `
+  --save-embeddings `
+  --metrics-output "artifacts/metrics/phase5_training.json"
+
+#########################
+# PHASE 5B: SIGN PRECOMPUTATION (~30-60 sec, run once after training)
+# Precomputes A*X, A^2*X, A^3*X — stored for fast inference
+#########################
+
+.\.venv\Scripts\python.exe phase5b_sign_precompute.py `
+  --input-dir "artifacts/phase4_pyg" `
+  --output-dir "artifacts/phase4_pyg" `
+  --hops 3
+
+#########################
+# PHASE 5C: SIGN STUDENT MLP TRAINING (~5 min)
+# Fast inference model via knowledge distillation
+# Target: 300k-800k nodes/sec at <1ms latency
+#########################
+
+.\.venv\Scripts\python.exe phase5c_sign_student.py `
+  --sign-dir  "artifacts/phase4_pyg" `
+  --model-dir "artifacts/phase5_model" `
+  --output-dir "artifacts/phase5_model" `
+  --epochs 30 `
+  --batch-size 4096 `
+  --kd-temp 3.0 `
+  --kd-alpha 0.7 `
+  --hidden-dim 512 `
+  --focal-gamma 2.0
+
+#########################
+# BENCHMARKING
+#########################
+
+# Real-time inference benchmark (MGNN v2 full model)
+.\.venv\Scripts\python.exe realtime_inference_benchmark.py `
+  --input-dir "artifacts/phase4_pyg" `
+  --model-path "artifacts/phase5_model/best_model.pt" `
+  --batch-sizes "1,8,32,128,512" `
+  --warmup-steps 10 `
+  --measure-steps 100 `
+  --output "artifacts/benchmarks/realtime_inference_report.json"
+
+# Model comparison benchmarks (all baselines vs MGNN v2)
+.\.venv\Scripts\python.exe run_model_benchmarks.py `
+  --models "xgboost,mlp,cnn,lstm,graphsage,gat" `
+  --epochs 10 `
+  --dense-batch-size 4096 `
+  --graph-batch-size 1024 `
+  --inference-batch-size 512
+
+#########################
+# RESEARCH ANALYTICS (all fast — use existing model)
+#########################
+
+# ROC/AUC curves for all 15 classes
+.\.venv\Scripts\python.exe run_roc_analysis.py
+
+# Graph structural analysis (degree distribution, homophily)
+.\.venv\Scripts\python.exe run_graph_structural_analysis.py
+
+# UMAP embedding visualization (requires --save-embeddings from Phase 5)
+.\.venv\Scripts\python.exe run_umap_analysis.py
+
+# Adversarial robustness study
+.\.venv\Scripts\python.exe run_adversarial_robustness.py `
+  --input-dir "artifacts/phase4_pyg" `
+  --model-path "artifacts/phase5_model/best_model.pt" `
+  --output "artifacts/research/adversarial_robustness.json"
+
+# Component ablation study (~35 min — can run overnight)
+.\.venv\Scripts\python.exe run_component_ablation.py `
+  --epochs 10 --batch-size 1024
+
+#########################
+# STREAMING & SCALING EXPERIMENTS
+#########################
+
+.\.venv\Scripts\python.exe run_streaming_windows.py `
+  --input "artifacts/phase2_sampled_500k" `
+  --output-root "artifacts/streaming" `
+  --window-hours 6 `
+  --step-hours 2 `
+  --max-windows 12 `
+  --master "local[12]"
+
+.\.venv\Scripts\python.exe run_differential_training.py `
+  --windows-root "artifacts/streaming" `
+  --global-edge-input "artifacts/phase3_final" `
+  --output-root "artifacts/diff_training" `
+  --epochs-per-window 3 `
+  --batch-size 1024
+
+.\.venv\Scripts\python.exe run_ablation_scale.py `
+  --scales "100000,300000,550000" `
+  --epochs 10 `
+  --batch-size 1024
+
+#########################
+# LAUNCH DASHBOARD
+#########################
+
+uv run streamlit run streamlit_app.py

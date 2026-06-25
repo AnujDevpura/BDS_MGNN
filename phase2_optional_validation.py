@@ -1,4 +1,4 @@
-# phase2_optional_validation.py
+﻿# phase2_optional_validation.py
 
 # =========================================================
 # MGNN PHASE 2 VALIDATION GATE

@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import csv
 import json
 import platform
@@ -14,19 +14,89 @@ from torch_geometric.loader import NeighborLoader
 from torch_geometric.nn import RGCNConv
 
 
-class MGNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_relations, dropout=0.2):
-        super().__init__()
-        self.conv1 = RGCNConv(in_channels, hidden_channels, num_relations=num_relations)
-        self.conv2 = RGCNConv(hidden_channels, hidden_channels, num_relations=num_relations)
-        self.lin = torch.nn.Linear(hidden_channels, out_channels)
-        self.dropout = dropout
+DROPOUT = 0.2
 
-    def forward(self, x, edge_index, edge_type):
-        x = F.relu(self.conv1(x, edge_index, edge_type))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = F.relu(self.conv2(x, edge_index, edge_type))
-        return self.lin(x)
+class MGNN(torch.nn.Module):
+    class WeightedRGCNConv(torch.nn.Module):
+        def __init__(self, in_channels, out_channels, num_relations):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(num_relations, in_channels, out_channels))
+            self.root = torch.nn.Linear(in_channels, out_channels, bias=False)
+            self.bias = torch.nn.Parameter(torch.zeros(out_channels))
+            self.reset_parameters()
+
+        def reset_parameters(self):
+            torch.nn.init.xavier_uniform_(self.weight)
+            self.root.reset_parameters()
+            torch.nn.init.zeros_(self.bias)
+
+        def forward(self, x, edge_index, edge_type, edge_weight=None):
+            out = self.root(x)
+            num_nodes = x.size(0)
+            if edge_weight is None:
+                edge_weight = torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)
+            else:
+                edge_weight = edge_weight.to(device=x.device, dtype=x.dtype)
+            src_all, dst_all = edge_index
+            for relation_id in range(self.weight.size(0)):
+                rel_mask = edge_type == relation_id
+                if not torch.any(rel_mask):
+                    continue
+                src = src_all[rel_mask]
+                dst = dst_all[rel_mask]
+                rel_x = x[src] @ self.weight[relation_id]
+                rel_w = edge_weight[rel_mask].unsqueeze(1)
+                rel_msg = rel_x * rel_w
+                rel_out = x.new_zeros((num_nodes, rel_msg.size(1)))
+                rel_out.index_add_(0, dst, rel_msg)
+                rel_deg = x.new_zeros(num_nodes)
+                rel_deg.index_add_(0, dst, edge_weight[rel_mask])
+                rel_out = rel_out / rel_deg.clamp_min(1.0).unsqueeze(1)
+                out = out + rel_out
+            return out + self.bias
+
+    def __init__(self, in_channels, hidden_channels, out_channels, num_relations, use_edge_weight=False, enhanced=False):
+        super().__init__()
+        conv_cls = self.WeightedRGCNConv if use_edge_weight else RGCNConv
+        self.use_edge_weight = use_edge_weight
+        self.feature_proj = torch.nn.Sequential(
+            torch.nn.Linear(in_channels, hidden_channels),
+            torch.nn.LayerNorm(hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(DROPOUT)
+        )
+        self.bypass = torch.nn.Sequential(
+            torch.nn.Linear(in_channels, hidden_channels),
+            torch.nn.LayerNorm(hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(DROPOUT),
+            torch.nn.Linear(hidden_channels, out_channels)
+        )
+        self.conv1 = conv_cls(hidden_channels, hidden_channels, num_relations=num_relations)
+        self.conv2 = conv_cls(hidden_channels, hidden_channels, num_relations=num_relations)
+        self.lin = torch.nn.Linear(hidden_channels, out_channels)
+        self.norm1 = torch.nn.LayerNorm(hidden_channels) if enhanced else None
+        self.norm2 = torch.nn.LayerNorm(hidden_channels) if enhanced else None
+
+    def forward(self, x, edge_index, edge_type, edge_weight=None):
+        out_bypass = self.bypass(x)
+        h = self.feature_proj(x)
+        if edge_weight is not None and self.use_edge_weight:
+            h = self.conv1(h, edge_index, edge_type, edge_weight)
+        else:
+            h = self.conv1(h, edge_index, edge_type)
+        h = self.norm1(h) if self.norm1 is not None else h
+        h = F.relu(h)
+        h = F.dropout(h, p=DROPOUT, training=self.training)
+        residual = h
+        if edge_weight is not None and self.use_edge_weight:
+            h = self.conv2(h, edge_index, edge_type, edge_weight)
+        else:
+            h = self.conv2(h, edge_index, edge_type)
+        h = self.norm2(h) if self.norm2 is not None else h
+        h = F.relu(h + residual) if self.norm2 is not None else F.relu(h)
+        out_gnn = self.lin(h)
+        return out_gnn + out_bypass
 
 
 class MLPBaseline(torch.nn.Module):
@@ -85,7 +155,12 @@ def benchmark_mgnn(model, data, eval_idx, batch_size, neighbors, warmup, steps, 
                 break
             batch = batch.to(device)
             infer_start = time.perf_counter()
-            out = model(batch.x, batch.edge_index, batch.edge_type)
+            out = model(
+                batch.x,
+                batch.edge_index,
+                batch.edge_type,
+                batch.edge_attr if model.use_edge_weight else None,
+            )
             preds = out[:batch.batch_size].argmax(dim=1)
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -164,15 +239,22 @@ def main():
     y = torch.load(input_dir / "y.pt", map_location="cpu", weights_only=False).long()
     edge_index = torch.load(input_dir / "edge_index.pt", map_location="cpu", weights_only=False).long()
     edge_type = torch.load(input_dir / "edge_type.pt", map_location="cpu", weights_only=False).long()
+    edge_weight = torch.load(input_dir / "edge_weight.pt", map_location="cpu", weights_only=False).float()
     norm_path = Path(args.normalization_path) if args.normalization_path else model_dir / "feature_normalization.pt"
     split_path = Path(args.split_path) if args.split_path else model_dir / "split_indices.pt"
     norm = torch.load(norm_path, map_location="cpu", weights_only=False)
     x = (x - norm["mean"]) / norm["std"]
     splits = torch.load(split_path, map_location="cpu", weights_only=False)
     train_idx, test_idx = splits["train_idx"].long(), splits["test_idx"].long()
-    data = Data(x=x, y=y, edge_index=edge_index, edge_type=edge_type)
+    data = Data(x=x, y=y, edge_index=edge_index, edge_type=edge_type, edge_attr=edge_weight)
     num_classes = int(y.max()) + 1
-    mgnn = MGNN(x.size(1), 64, num_classes, 2).to(device)
+    summary_path = model_dir / "run_summary.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    mgnn = MGNN(
+        x.size(1), summary.get("hidden_dim", 64), num_classes, 2,
+        enhanced=summary.get("enhanced_model", False),
+        use_edge_weight=summary.get("use_edge_weight", False),
+    ).to(device)
     mgnn.load_state_dict(torch.load(args.model_path, map_location=device, weights_only=False))
     x_device, y_device = x.to(device), y.to(device)
     mlp = MLPBaseline(x.size(1), args.baseline_hidden, num_classes).to(device)
