@@ -72,19 +72,23 @@
 Real-Time Medical Conversation Intelligence via\\
 LLM-Guided NER, Custom Entity Schemas, and FHIR Alignment}
 
-\author{Arushi~Vaidya,~Aryan~Gupta,~Ananya~S.~Hebbar,~and~Manonmani~S.%
+\author{Arushi~Vaidya,~Aryan~Gupta,~Ananya~S.~Hebbar,~Dhruv~Dhankher,~Anuj~Devpura,~Aditya~Rukmangad,~Vijaya~Kumar,~and~Manonmani~S.%
 \IEEEcompsocitemizethanks{
-\IEEEcompsocthanksitem A. Vaidya, A. Gupta, and A. S. Hebbar are with the
+\IEEEcompsocthanksitem A. Vaidya, A. Gupta, A. S. Hebbar, D. Dhankher,
+A. Devpura, and A. Rukmangad are with the Department of Computer Science
+and Engineering, RV College of Engineering, Bengaluru 560059, India.
+E-mail: \{arushivaidya.cs23, aryangupta.cs23, ananyashebbar.cs23,
+dhruvdhankher.cs23, anujdevpura.cs23, adityarukmangad.cs23\}@rvce.edu.in
+\IEEEcompsocthanksitem V. Kumar is an Associate Professor with the
 Department of Computer Science and Engineering, RV College of Engineering,
-Bengaluru 560059, India.
-E-mail: \{arushivaidya.cs23, aryangupta.cs23, ananyashebbar.cs23\}@rvce.edu.in
+Bengaluru 560059, India. E-mail: vijayakumar@rvce.edu.in
 \IEEEcompsocthanksitem M. S. Manonmani is an Assistant Professor with the
 Department of Computer Science and Engineering, RV College of Engineering,
 Bengaluru 560059, India. E-mail: manonmanis@rvce.edu.in
 }}
 
 \markboth{IEEE Transactions on Biomedical and Health Informatics, Vol.~XX, No.~X, 2025}%
-{Vaidya \etal: ClinicalMind — LLM Knowledge Distillation for Medical Conversation NER}
+{Vaidya \etal: ClinicalMind --- LLM Knowledge Distillation for Medical Conversation NER}
 
 \maketitle
 
@@ -292,89 +296,102 @@ dependency.
 %% ── Figure 1: Full Pipeline Architecture ─────────────────────
 \begin{figure*}[t]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
-  node distance=0.45cm and 0.6cm,
-  every node/.style={font=\small},
+  node distance=0.35cm and 0.5cm,
+  every node/.style={font=\normalsize},
   box/.style={
-    draw, rounded corners=4pt, minimum height=0.75cm,
-    text centered, text width=2.0cm, line width=0.8pt
+    draw, rounded corners=5pt,
+    minimum height=1.1cm, minimum width=2.4cm,
+    text centered, text width=2.2cm, line width=1pt
   },
   trainbox/.style={box, fill=colorA!12, draw=colorA!70},
   inferbox/.style={box, fill=colorB!12, draw=colorB!70},
   sharedbox/.style={box, fill=colorD!12, draw=colorD!70},
-  storebox/.style={box, fill=colorE!10, draw=colorE!50, dashed},
-  arrow/.style={-{Stealth[length=5pt]}, line width=0.9pt, color=arrowcol},
-  dasharrow/.style={-{Stealth[length=5pt]}, dashed, line width=0.7pt, color=gray!70},
-  groupbox/.style={draw=gray!40, rounded corners=5pt, fill=gray!6,
-                   inner sep=6pt, line width=0.6pt}
+  storebox/.style={box, fill=colorE!10, draw=colorE!60, dashed, line width=1pt},
+  arrow/.style={-{Stealth[length=6pt,width=5pt]}, line width=1.2pt, color=arrowcol},
+  dasharrow/.style={-{Stealth[length=6pt,width=5pt]}, dashed,
+                    line width=1pt, color=colorE!80},
+  groupbox/.style={draw=gray!45, rounded corners=7pt, fill=gray!5,
+                   inner sep=9pt, line width=0.8pt}
 ]
 
-%% ── Row 0: Input ─────────────────────────────────────────────
-\node[sharedbox, text width=2.2cm] (audio) {Audio\\Recording};
-\node[sharedbox, right=0.55cm of audio, text width=2.2cm] (asr)
-      {ASR Module\\(Whisper / Google)};
-\node[sharedbox, right=0.55cm of asr, text width=2.2cm] (preproc)
+%% ── Shared input stage (left column) ────────────────────────
+\node[sharedbox] (audio) {Audio\\Recording};
+\node[sharedbox, right=0.5cm of audio] (asr)
+      {ASR Module\\(Whisper/Google)};
+\node[sharedbox, right=0.5cm of asr] (preproc)
       {Transcript\\Pre-processing};
 
-%% ── Row 1: Training path (top) ───────────────────────────────
-\node[trainbox, above right=0.55cm and 0.55cm of preproc, text width=2.4cm]
-      (gemini) {Gemini\\Annotation\\Engine};
-\node[trainbox, right=0.55cm of gemini, text width=2.4cm]
-      (valida) {Position\\Validation\\(Alg.~\ref{alg:validation})};
-\node[trainbox, right=0.55cm of valida, text width=2.4cm]
-      (train)  {spaCy NER\\Training\\(30 epochs)};
-\node[storebox, right=0.55cm of train, text width=2.0cm]
-      (model)  {Trained\\NER Model};
+%% ── Training path (top row, right of preproc) ───────────────
+\node[trainbox, above right=0.6cm and 0.55cm of preproc] (gemini)
+      {Gemini\\Annotation\\Engine};
+\node[trainbox, right=0.5cm of gemini] (valida)
+      {Position\\Validation\\(Alg.\,2)};
+\node[trainbox, right=0.5cm of valida] (train)
+      {spaCy NER\\Training\\(30 epochs)};
+\node[storebox,  right=0.5cm of train]  (model)
+      {Trained\\NER\\Model};
 
-%% ── Row 2: Inference path (bottom) ───────────────────────────
-\node[inferbox, below right=0.55cm and 0.55cm of preproc, text width=2.4cm]
-      (ner)    {spaCy NER\\Inference\\(12\,ms)};
-\node[inferbox, right=0.55cm of ner, text width=2.4cm]
-      (struct) {Structured\\Medical\\Extraction};
-\node[inferbox, right=0.55cm of struct, text width=2.4cm]
-      (fhir)   {FHIR\,R4\\Resource\\Mapping};
-\node[inferbox, right=0.55cm of fhir, text width=2.0cm]
-      (ehr)    {EHR\\Integration};
+%% ── Inference path (bottom row, right of preproc) ───────────
+\node[inferbox, below right=0.6cm and 0.55cm of preproc] (ner)
+      {spaCy NER\\Inference\\(12\,ms)};
+\node[inferbox, right=0.5cm of ner] (struct)
+      {Structured\\Medical\\Extraction};
+\node[inferbox, right=0.5cm of struct] (fhir)
+      {FHIR\,R4\\Resource\\Mapping};
+\node[inferbox, right=0.5cm of fhir]   (ehr)
+      {EHR\\Integration};
 
-%% ── Arrows: shared input ──────────────────────────────────────
+%% ── Shared-input arrows ──────────────────────────────────────
 \draw[arrow] (audio)   -- (asr);
 \draw[arrow] (asr)     -- (preproc);
-\draw[arrow] (preproc) -- ++(0,1.0) -| (gemini);
-\draw[arrow] (preproc) -- ++(0,-1.0) -| (ner);
 
-%% ── Arrows: training path ─────────────────────────────────────
-\draw[arrow] (gemini)  -- (valida);
-\draw[arrow] (valida)  -- (train);
-\draw[arrow] (train)   -- (model);
-\draw[dasharrow] (model) -- ++(0,-0.9) -| (ner)
-      node[midway, below, font=\scriptsize, color=colorE!80] {deploy};
+%% Branch from preproc to both paths
+\coordinate (branch) at ($(preproc.east)+(0.28,0)$);
+\draw[arrow] (preproc.east) -- (branch);
+\draw[arrow] (branch) |- (gemini.west);
+\draw[arrow] (branch) |- (ner.west);
 
-%% ── Arrows: inference path ────────────────────────────────────
+%% ── Training arrows ──────────────────────────────────────────
+\draw[arrow] (gemini) -- (valida);
+\draw[arrow] (valida) -- (train);
+\draw[arrow] (train)  -- (model);
+
+%% Deploy dashed arrow from model down to ner
+\draw[dasharrow] (model.south) -- ++(0,-0.45) -| (ner.north)
+      node[pos=0.28, above, font=\small, color=colorE!90] {deploy};
+
+%% ── Inference arrows ─────────────────────────────────────────
 \draw[arrow] (ner)    -- (struct);
 \draw[arrow] (struct) -- (fhir);
 \draw[arrow] (fhir)   -- (ehr);
 
-%% ── Bounding group boxes ─────────────────────────────────────
+%% ── Group bounding boxes ─────────────────────────────────────
 \begin{scope}[on background layer]
-  \node[groupbox, fit=(gemini)(valida)(train)(model),
-        label={[font=\scriptsize\bfseries, color=colorA]above:Training Mode (Offline)}]
-        (traingroup) {};
-  \node[groupbox, fit=(ner)(struct)(fhir)(ehr),
-        label={[font=\scriptsize\bfseries, color=colorB]below:Inference Mode (Real-Time)}]
-        (infergroup) {};
-  \node[groupbox, fit=(audio)(asr)(preproc),
-        fill=colorD!5,
-        label={[font=\scriptsize\bfseries, color=colorD]above:Shared Input Stage}]
-        (sharedgroup) {};
+  \node[groupbox, fill=colorD!5,
+        fit=(audio)(asr)(preproc),
+        label={[font=\small\bfseries, color=colorD!90, yshift=2pt]
+               above:Shared Input Stage}] {};
+  \node[groupbox, fill=colorA!5,
+        fit=(gemini)(valida)(train)(model),
+        label={[font=\small\bfseries, color=colorA!90, yshift=2pt]
+               above:Training Mode (Offline)}] {};
+  \node[groupbox, fill=colorB!5,
+        fit=(ner)(struct)(fhir)(ehr),
+        label={[font=\small\bfseries, color=colorB!90, yshift=-2pt]
+               below:Inference Mode (Real-Time)}] {};
 \end{scope}
 
-\end{tikzpicture}
+\end{tikzpicture}%
+}% end resizebox
 \caption{ClinicalMind end-to-end pipeline architecture. The shared input
-stage (amber) converts audio to pre-processed text. In \emph{training mode}
-(blue), the Gemini annotation engine generates span-annotated data that trains
-the spaCy NER model. In \emph{inference mode} (green), the deployed model
-processes new conversations at 12\,ms per conversation, producing FHIR\,R4
-resources for EHR integration—with no LLM dependency at runtime.}
+stage (amber) converts raw audio to pre-processed text. In \emph{training
+mode} (blue), the Gemini annotation engine generates span-annotated data
+that trains the spaCy NER model, which is then deployed. In
+\emph{inference mode} (green), the deployed model processes new
+conversations at 12\,ms per conversation, producing FHIR\,R4 resources
+for EHR integration—with no LLM dependency at runtime.}
 \label{fig:architecture}
 \end{figure*}
 
