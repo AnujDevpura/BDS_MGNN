@@ -2,7 +2,7 @@
 %%  ClinicalMind — Q1 Journal Submission (IEEE Transactions)
 %%  Full Overleaf-Ready LaTeX Source
 %% ============================================================
-\documentclass[journal,twoside,12pt]{IEEEtran}
+\documentclass[conference]{IEEEtran}
 
 %% ── Core packages ────────────────────────────────────────────
 \usepackage[T1]{fontenc}
@@ -22,7 +22,7 @@
 \usepackage{tabularx}
 \usepackage{url}
 \usepackage{hyperref}
-\usepackage{balance}
+%\usepackage{balance}  % journal-only
 \usepackage{pgf-pie}
 
 %% ── Drawing / Plotting ───────────────────────────────────────
@@ -68,9 +68,7 @@
 %% ═════════════════════════════════════════════════════════════
 \begin{document}
 
-\title{ClinicalMind: A Knowledge-Distillation Framework for\\
-Real-Time Medical Conversation Intelligence via\\
-LLM-Guided NER, Custom Entity Schemas, and FHIR Alignment}
+\title{ClinicalMind: Real-Time Clinical NER via LLM Knowledge Distillation and FHIR-Aligned Summarization}
 
 \author{%
 \IEEEauthorblockN{Dhruv Dhankher}
@@ -98,9 +96,6 @@ RV College of Engineering\\
 Bengaluru, India\\
 vijayakumar@rvce.edu.in}
 }
-
-\markboth{IEEE Transactions on Biomedical and Health Informatics, Vol.~XX, No.~X, 2025}%
-{Dhankher \etal: ClinicalMind --- LLM Knowledge Distillation for Medical Conversation NER}
 
 \maketitle
 
@@ -144,7 +139,7 @@ Annotation Pipeline, spaCy, Gemini, LLM-Guided Annotation
 \section{Introduction}
 \label{sec:intro}
 
-\IEEEPARstart{C}{linical} documentation is among the most time-intensive
+Clinical documentation is among the most time-intensive
 administrative tasks in contemporary medicine. Landmark time-motion studies
 have demonstrated that physicians allocate approximately two hours to
 electronic health record (EHR) documentation for every hour of direct patient
@@ -1197,7 +1192,6 @@ and reviewed by human domain experts. The final trained ClinicalMind model
 operates entirely independently of any large language model.
 
 %% ═════════════════════════════════════════════════════════════
-\balance
 \bibliographystyle{IEEEtran}
 \begin{thebibliography}{29}
 
